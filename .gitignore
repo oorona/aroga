@@ -1,0 +1,6 @@
+.github
+.env
+.git
+secrets
+cogs/__pycache__
+__pycache__

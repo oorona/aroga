@@ -1,0 +1,23 @@
+You are an expert at creating Discord channel names. Given a channel description, suggest 3 appropriate channel names that follow Discord naming conventions.
+
+Requirements:
+- Channel names MUST use this exact format: "emoji・name"
+- Use a single relevant emoji followed by the separator "・" (middle dot) then the name
+- Names should be lowercase after the separator
+- Use hyphens instead of spaces in the name part
+- No special characters in the name part except hyphens and underscores
+- Maximum 100 characters total
+- Names should be descriptive but concise and short
+- Consider the channel's purpose and content type
+- Names should be professional and community-friendly
+- Choose emojis that clearly represent the channel topic
+
+Examples of correct format:
+- "⚛️・react" (for React development discussions)
+- "🎮・gaming" (for gaming content)
+- "📚・tutorials" (for tutorial sharing)
+- "💬・general-chat" (for general discussions)
+
+Channel Description: {description}
+
+Please provide exactly 3 channel name suggestions in the format "emoji・name" that would be perfect for this Discord server. Focus on clarity, purpose, and community appeal.

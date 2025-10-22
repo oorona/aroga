@@ -1,0 +1,64 @@
+services:
+  agora-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agora-bot:latest
+    container_name: agora
+    restart: unless-stopped
+    
+    # Environment configuration
+    env_file:
+      - .env
+    
+    # Docker secrets
+    secrets:
+      - discord_bot_token
+      - db_password
+      - open_webui_token
+    
+    # Connect to database and intranet networks
+    networks:
+      - dbnet
+      - intranet
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Dependencies (if running databases locally)
+    # depends_on:
+    #   - postgres
+    #   - redis
+
+# Use external networks for database and intranet connections
+networks:
+  dbnet:
+    external: true
+  intranet:
+    external: true
+
+# Docker secrets configuration
+secrets:
+  discord_bot_token:
+    file: ./secrets/discord_bot_token.txt
+  db_password:
+    file: ./secrets/db_password.txt
+  open_webui_token:
+    file: ./secrets/open_webui_token.txt
+
+# Uncomment if you want to run databases locally
+# volumes:
+#   postgres_data:
+#   redis_data:

@@ -1,0 +1,273 @@
+Agora Bot Technical Specification
+
+1.0 Overview
+This document outlines the technical specification for a multi-functional Discord bot ("the Bot"). The Bot's primary purpose is to manage community engagement by providing a formal system for users to propose new channels and emojis. All proposals are routed to an administrator-managed approval queue.
+The Bot will also track message activity in specified channels, ranking them by a "score," and provide a separate system for users to submit confidential reports (e.g., scams, user issues) to the admin team.
+The system is designed to be robust, restart-persistent, and scalable, using a Docker-based architecture with a PostgreSQL database for permanent data and a Redis cache for high-frequency statistics.
+
+2.0 Core Technology Stack
+    Language: Python 3.10+
+    Discord Library: discord.py (v2.x), utilizing the Cogs extension for command organization.
+    Primary Database (Permanent Data): PostgreSQL
+    Cache Database (Volatile Stats): Redis
+    Containerization: Docker & Docker Compose
+    LLM Integration: Via HTTP API calls to an external Open Web UI endpoint using function/instruction calling for structured responses.
+    Logging: Standard Python logging module.
+
+3.0 Project & File Structure
+The project will be organized as follows:
+```
+agora/
+|
+|-- main.py                 # Entry point. Loads cogs and starts the bot.
+|-- bot.py                  # Defines the main Bot class, setup hooks, and event listeners.
+|
+|-- /cogs/                  # Directory for command modules (Cogs)
+|   |-- proposals.py        # /propose_channel, /propose_emoji
+|   |-- admin_queue.py      # /approve_proposal, /reject_proposal
+|   |-- admin_reports.py    # /view_report, /resolve_report
+|   |-- admin_manage.py     # /promote_channel, /recalculate_stats, /refresh_channels
+|   |-- user_reports.py     # /report
+|   |-- core.py             # /status (health check)
+|   |-- tasks.py            # Background loop for stats reporting.
+|
+|-- /database/
+|   |-- db_models.py        # SQLAlchemy models for PostgreSQL tables.
+|   |-- db_session.py       # Code to initialize PG and Redis connections.
+|   |-- redis_client.py     # Helper functions for Redis operations (get/set stats).
+|
+|-- /templates/
+|   |-- new_channel_announcement.md
+|   |-- promoted_channel_announcement.md
+|
+|-- /prompts/
+|   |-- channel_name_suggestion.txt   # LLM prompt template for channel name suggestions
+|
+|-- Dockerfile              # Instructions to build the bot's Docker image.
+|-- docker-compose.yml      # Manages the bot service and its environment.
+|-- .env                    # Configuration variables (channel IDs, settings).
+|-- requirements.txt        # List of Python dependencies.
+|
+|-- /secrets/
+|   |-- discord_bot_token.txt
+|   |-- db_password.txt
+|   |-- open_webui_token.txt
+
+4.0 Configuration & Secrets Management
+Configuration will be split into non-sensitive environment variables and sensitive Docker secrets.
+
+4.1 Docker Compose (docker-compose.yml)
+    Defines a single service for the bot.
+    Connects the bot to the pre-existing Docker network: dbnet.
+    Uses env_file: .env to load all non-sensitive configuration.
+    Uses Docker secrets to securely mount sensitive credentials at /run/secrets/.
+    Implements a HEALTHCHECK using the /status command.
+
+4.2 Environment Variables (.env file)
+This file will store all non-sensitive IDs and settings.
+    LOG_LEVEL: (e.g., DEBUG, INFO) For the Python logger.
+    ADMIN_NOTIFICATION_CHANNEL_ID: For all raw notifications (proposals, reports).
+    QUEUE_CHANNEL_ID: For the editable "pending" embeds.
+    PUBLIC_ANNOUNCEMENT_CHANNEL_ID: For new/promoted channel announcements.
+    PROPOSED_CHANNEL_CATEGORY_ID: Category where new channels are created.
+    PERMANENT_CHANNEL_CATEGORY_ID: Category to move "promoted" channels to.
+    PROPOSED_ACTIVITY_REPORT_CHANNEL_ID: Channel for the "proposed" score embed.
+    PERMANENT_ACTIVITY_REPORT_CHANNEL_ID: Channel for the "permanent" activity embed.
+    STATS_REFRESH_INTERVAL_MINUTES: How often the activity score task runs.
+    MAX_PROPOSED_CHANNELS: Integer limit for number of channels allowed in the proposed category.
+    STATS_RECALCULATION_MONTH_LIMIT: (e.g., 6) Max number of months to look back for /recalculate_stats.
+    OPEN_WEB_UI_URL: The API endpoint for the LLM.
+    OPEN_WEB_UI_MODEL: Model name to use for LLM requests (e.g., 'llama3.2', 'gpt-4', 'mistral').
+    DB_HOST: postgres (or the service name on dbnet).
+    DB_PORT: PostgreSQL port (default: 5432).
+    DB_NAME: discord
+    DB_USER: discord
+    REDIS_HOST: redis (or the service name on dbnet).
+
+4.3 Docker Secrets
+These files contain sensitive tokens and are managed via Docker secrets, mounted at /run/secrets/ at runtime.
+    discord_bot_token.txt - Discord bot authentication token
+    db_password.txt - PostgreSQL database password  
+    open_webui_token.txt - Open Web UI API authentication token
+
+The docker-compose.yml defines these as proper Docker secrets with file references.
+
+5.0 Database & Storage Schema
+Data storage is split between PostgreSQL (permanent, relational data) and Redis (volatile, statistical data).
+
+5.1 PostgreSQL (Permanent Data)
+    proposals
+        proposal_id: (Primary Key, Serial)
+        user_id: (BigInt, Discord User ID)
+        proposal_type: (Text: "channel" or "emoji")
+        status: (Text: "pending", "approved", "rejected")
+        original_text: (Text: User's raw proposal text)
+        llm_suggestion: (Text: Name suggested by the LLM, or error)
+        final_name: (Text: The name finalized by the admin)
+        file_url: (Text: URL to attachment, for emoji)
+        created_at: (Timestamp)
+    reports
+        report_id: (Primary Key, Serial)
+        user_id: (BigInt, Reporting User ID)
+        status: (Text: "pending", "investigating", "resolved")
+        description: (Text: User's report)
+        file_url: (Text: URL to optional screenshot)
+        notification_message_id: (BigInt, ID of the message in the admin notification channel)
+    tracked_channels
+        channel_id: (Primary Key, BigInt, Discord Channel ID)
+        category: (Text: "proposed" or "permanent")
+    persistent_embeds
+        embed_name: (Primary Key, Text: e.g., "proposal_queue", "report_queue", "proposed_scores", "permanent_scores")
+        channel_id: (BigInt)
+        message_id: (BigInt)
+        (This table allows the bot to find and edit its own persistent messages after a restart.)
+
+5.2 Redis (Volatile Stats Data)
+    Channel Stats (Redis Hash)
+        Key: channel_stats:{channel_id}
+        Fields:
+            total_messages: (Integer)
+            last_message_timestamp: (Integer)
+    Channel Activity (Redis Sorted Set)
+        Key: channel_activity:{channel_id}
+        Score: The Unix timestamp of the message.
+        Value: A unique identifier (e.g., message_id).
+        (This structure allows for efficient calculation of "messages in the last 7 days" using ZCOUNT.)
+
+6.0 Core Systems & Logic
+
+6.1 User Proposal System
+    A user runs /propose_channel [idea_text] or /propose_emoji [name] [file].
+    Input Validation:
+        For Channel Proposals: Text-only validation and sanitization of [idea_text].
+        For Emoji Proposals: Multi-layer validation following Discord's requirements:
+            - File formats: PNG, JPG, JPEG, GIF (animated GIFs allowed)
+            - File size: Maximum 256 KB (262,144 bytes)
+            - Dimensions: Recommended 128x128px, minimum 32x32px, maximum 256x256px
+            - Square ratio: Width and height must be equal (1:1 aspect ratio)
+            - MIME type validation: Verify actual image content matches file extension
+            - Name validation: 2-32 characters, alphanumeric and underscores only, no spaces
+            - Security: Treat as raw image data only - no execution, no file system writes
+            - Memory handling: Process uploaded images in memory only, never save to server filesystem
+        If validation fails, reply with an ephemeral error explaining the specific issue.
+    Limit Check: The Bot checks Postgres for a proposal where user_id matches and status is "pending" for the same proposal_type.
+        If found, reply with an ephemeral error: "You already have a pending [type] proposal."
+        If not found, proceed.
+    Channel Limit Check (for channels only): The Bot checks if the number of channels in the proposed category is at or over MAX_PROPOSED_CHANNELS.
+        If full, reply with an ephemeral error: "We are at our limit for new channels. Please try again later."
+    Acknowledgement: The Bot sends an ephemeral reply: "Thank you! Your proposal has been submitted for review."
+    Backend Process (Asynchronous):
+        For Channel: The Bot calls the Open Web UI API with [idea_text] using function/instruction calling to ensure structured JSON responses.
+            Uses prompt templates from /prompts/ folder with function definitions for reliable output parsing.
+            On Success: The LLM's suggested name is extracted from the structured response and saved.
+            On Failure: A failure message is saved in place of the suggestion.
+        A new row is created in the proposals table (status: "pending").
+        A notification is sent to the ADMIN_NOTIFICATION_CHANNEL.
+        The QUEUE_CHANNEL_ID "Pending Proposals" embed is edited to add the new proposal.
+
+6.2 Admin Notification & Queue System
+    ADMIN_NOTIFICATION_CHANNEL: This is an immutable log. Every new proposal and report sends a new detailed embed message to this channel. This embed contains all data (user, full text, LLM suggestion, attachments).
+    QUEUE_CHANNEL: This is the action center. The Bot maintains two persistent embed messages here (finding them via the persistent_embeds table).
+        "Pending Proposals" Embed: A list of [Proposal ID] - [Type] - [User] - [Name].
+        "Pending User Reports" Embed: A list of [Report ID] - [User] - [Brief Description].
+    The Bot edits these embeds to add/remove items as they are submitted and resolved.
+
+6.3 Admin Approval Workflow (Interactive)
+    Admin runs /approve_proposal [proposal_id].
+    Bot checks if the proposal is for a "channel" and if an LLM name exists.
+    Bot sends an ephemeral message with buttons:
+        "Approve as [llm_name]"
+        "Override Name"
+        "Re-run LLM Suggestion"
+    If "Override": Bot responds with a Modal (popup form) asking for the new_name.
+    If "Re-run": Bot calls the LLM again and presents the new name with the same buttons.
+    On Final Approval:
+        The final_name is set in the proposals table.
+        status is set to "approved".
+        The proposal is removed from the queue embed.
+        For Channel: The Bot creates the new channel under PROPOSED_CHANNEL_CATEGORY_ID. A new row is added to tracked_channels.
+        For Emoji: The Bot creates the emoji on the server.
+        The Bot sends a DM to the original user: "Your [type] proposal '[final_name]' has been approved!"
+        The Bot posts an embed to the PUBLIC_ANNOUNCEMENT_CHANNEL using the new_channel_announcement.md template.
+
+6.4 User Reporting Workflow
+    User runs /report [description] [file (optional)].
+    Bot sends ephemeral reply: "Thank you for your report."
+    A new row is created in the reports table (status: "pending").
+    A full embed with the description and image link is sent to ADMIN_NOTIFICATION_CHANNEL. The message_id of this embed is saved in the reports table.
+    The QUEUE_CHANNEL_ID "Pending User Reports" embed is edited to add the new report.
+    Admin runs /view_report [report_id].
+        Bot sends a DM to the reporter: "Your report is being investigated."
+        Bot updates the reports table status to "investigating".
+        Bot sends an ephemeral reply to the admin with a direct URL to the notification_message_id for context.
+    Admin runs /resolve_report [report_id] [explanation].
+        Bot sends a DM to the reporter with the resolution: "Your report has been resolved. [explanation]".
+        Bot updates the reports table status to "resolved".
+        The report is removed from the queue embed.
+
+6.5 Activity Scoring & Channel Lifecycle
+    on_message Event Listener:
+        When a message is sent in any channel, the bot checks its cached list of tracked_channels.
+        If the channel_id is tracked:
+            It increments total_messages in the Redis Hash.
+            It updates last_message_timestamp in the Redis Hash.
+            It adds the message timestamp to the Redis Sorted Set (ZADD).
+    Background Task (loops every STATS_REFRESH_INTERVAL_MINUTES):
+        Fetches all tracked_channels from Postgres.
+        Loops through each "proposed" channel:
+            Fetches total_messages from Redis Hash.
+            Fetches recent_count from Redis ZSET (e.g., ZCOUNT ... -7days +inf).
+            Trims the ZSET (ZREMRANGEBYSCORE ... -inf -7days).
+            Calculates Score = (total_messages * 0.4) + (recent_count * 0.6).
+        Publishes Proposed Report: Edits the embed in PROPOSED_ACTIVITY_REPORT_CHANNEL_ID with a list ranked by the new Score.
+        Publishes Permanent Report: Edits the embed in PERMANENT_ACTIVITY_REPORT_CHANNEL_ID with a list ranked by last_message_timestamp (most recent first).
+    Channel Promotion:
+        Admin runs /promote_channel [channel].
+        Bot moves the channel to the PERMANENT_CHANNEL_CATEGORY_ID.
+        Bot updates the channel's category in the tracked_channels table (Postgres).
+        Bot posts an embed to the PUBLIC_ANNOUNCEMENT_CHANNEL using the promoted_channel_announcement.md template.
+
+6.6 Bot Operations & Maintenance
+    Startup:
+        Bot connects to PostgreSQL and Redis.
+        Loads all Cogs.
+        Fetches tracked_channels into a local cache.
+        Fetches persistent_embeds info.
+        Sends a "Bot Online" embed to the ADMIN_NOTIFICATION_CHANNEL.
+    Graceful Shutdown (on docker stop / SIGTERM):
+        The bot.py will catch the signal.
+        It will send a "Bot Shutting Down" embed to the ADMIN_NOTIFICATION_CHANNEL.
+        It will gracefully close all database connections before exiting.
+    Health Check:
+        /status command:
+        Checks PostgreSQL and Redis connections.
+        Replies with an ephemeral message: "Status: OK. DB: Connected. Redis: Connected."
+        This command will be used by the HEALTHCHECK in the docker-compose.yml.
+
+7.0 Command Reference
+
+7.1 User Commands (Ephemeral Replies)
+    /propose_channel (idea_text: string)
+        Submits a new channel idea for admin review.
+    /propose_emoji (name: string) (file: attachment)
+        Submits a new emoji for admin review.
+    /report (description: string) [file: attachment (optional)]
+        Submits a confidential report to the admin team.
+
+7.2 Admin-Only Commands
+    /approve_proposal (proposal_id: integer)
+        Starts the interactive flow to approve a channel or emoji.
+    /reject_proposal (proposal_id: integer) (reason: string)
+        Rejects a proposal and DMs the user with the reason.
+    /view_report (report_id: integer)
+        Marks a report as "investigating," DMs the reporter, and gives the admin a link to the full report.
+    /resolve_report (report_id: integer) (explanation: string)
+        Closes a report and DMs the reporter with the resolution.
+    /promote_channel (channel: channel)
+        Moves a "proposed" channel to the "permanent" category and sends a public announcement.
+    /recalculate_stats (months_limit: integer)
+        (Recovery Command) Wipes all Redis stats and rebuilds them by reading message history. Throttles itself to avoid rate limits.
+    /refresh_channels
+        (Recovery Command) Manually re-scans the proposed/permanent categories and updates the tracked_channels table in Postgres.
+    /status
+        (Health Check) Responds "OK" if all database connections are active.
