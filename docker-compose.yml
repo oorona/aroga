@@ -20,6 +20,7 @@ services:
     # Connect to database and intranet networks
     networks:
       - dbnet
+      - bot
       - intranet
     
     # Health check
@@ -47,6 +48,8 @@ networks:
   dbnet:
     external: true
   intranet:
+    external: true
+  bot:
     external: true
 
 # Docker secrets configuration
