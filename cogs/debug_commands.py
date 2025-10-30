@@ -12,6 +12,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+logger = logging.getLogger(__name__)
+
 
 class DebugCommandsCog(commands.Cog):
     """Cog for debug and testing commands."""
@@ -127,10 +129,66 @@ class DebugCommandsCog(commands.Cog):
                 f"📊 Recent (7d): {recent_count}\n"
                 f"📊 Score: {score:.2f}"
             )
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"🧪 **Test Data Added**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Channel:** {channel.mention}\n"
+                f"**Test Messages:** {message_count}\n"
+                f"**New Total:** {stats['total_messages']}\n"
+                f"**New Score:** {score:.2f}"
+            )
         
         except Exception as e:
-            self.logger.error(f"[debug_commands.test_message_tracking] Error: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ Error adding test data: {e}")
+            logger.error(f"Error in test_message_tracking: {e}")
+            await interaction.followup.send(f"❌ Error adding test messages: {str(e)}")
+
+    @app_commands.command(name="debug_channel", description="Debug channel activity scoring")
+    @app_commands.describe(channel="Channel to debug")
+    @app_commands.default_permissions(administrator=True)
+    async def debug_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Debug channel activity and scoring."""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            if not hasattr(self.bot.db_manager, 'redis_stats'):
+                await interaction.followup.send("❌ Redis stats not available")
+                return
+            
+            # Get channel stats
+            stats = await self.bot.db_manager.redis_stats.get_channel_stats(channel.id)
+            recent_count = await self.bot.db_manager.redis_stats.get_recent_message_count(channel.id, 7)
+            score = await self.bot.db_manager.redis_stats.calculate_channel_score(channel.id)
+            
+            # Get activity details
+            activity_count = await self.bot.db_manager.redis_stats.redis_client.zcard(f"channel_activity:{channel.id}")
+            last_activity = "Never"
+            if stats['last_message_timestamp']:
+                last_activity = f"<t:{int(stats['last_message_timestamp'])}:R>"
+            
+            await interaction.followup.send(
+                f"✅ Activity debug for {channel.mention}:\n"
+                f"📊 Total messages: {stats['total_messages']}\n"
+                f"📊 Recent (7d): {recent_count}\n"
+                f"📊 Score: {score:.2f}\n"
+                f"📊 Last activity: {last_activity}\n"
+                f"📊 Activity entries: {activity_count}"
+            )
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"🔍 **Activity Debug**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Channel:** {channel.mention}\n"
+                f"**Total Messages:** {stats['total_messages']}\n"
+                f"**Score:** {score:.2f}\n"
+                f"**Activity Entries:** {activity_count}"
+            )
+        
+        except Exception as e:
+            logger.error(f"Error in debug_activity: {e}")
+            await interaction.followup.send(f"❌ Error debugging activity: {str(e)}")
     
     @app_commands.command(name="backfill_stats", description="Backfill message statistics from recent history")
     @app_commands.default_permissions(administrator=True)
@@ -200,6 +258,15 @@ class DebugCommandsCog(commands.Cog):
                     self.logger.error(f"[debug_commands.backfill_stats] Error processing {ch.name}: {e}")
             
             await interaction.followup.send(f"✅ Backfill complete! Processed {total_messages} historical messages.")
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"📊 **Stats Backfill Complete**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Channels:** {len(channels_to_process)}\n" 
+                f"**Messages Processed:** {total_messages:,}\n"
+                f"**Time Period:** {days} days"
+            )
             
             # Trigger activity report update
             tasks_cog = self.bot.get_cog('BackgroundTasksCog')
@@ -287,6 +354,16 @@ class DebugCommandsCog(commands.Cog):
                     await interaction.followup.send(chunk)
             else:
                 await interaction.followup.send(message_content)
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"🔍 **Redis Data Inspected**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Channel:** {channel.mention}\n"
+                f"**Total Messages:** {stats['total_messages']}\n"
+                f"**Score:** {score:.2f}\n"
+                f"**Redis Entries:** {zset_size}"
+            )
         
         except Exception as e:
             self.logger.error(f"[debug_commands.inspect_redis] Error: {e}", exc_info=True)
@@ -310,12 +387,74 @@ class DebugCommandsCog(commands.Cog):
             await tasks_cog._update_permanent_activity_report()
             
             await interaction.followup.send("✅ Activity reports updated")
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"📊 **Activity Reports Updated**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Reports:** Proposed & Permanent activity reports refreshed"
+            )
         
         except Exception as e:
             self.logger.error(f"[debug_commands.trigger_activity_report] Error: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Error triggering reports: {e}")
 
+    @app_commands.command(name="debug_test", description="Simple test command to verify debug cog is working")
+    @app_commands.default_permissions(administrator=True)
+    async def debug_test(self, interaction: discord.Interaction):
+        """Simple test command to verify the debug cog is working."""
+        await interaction.response.send_message("✅ Debug commands cog is working!", ephemeral=True)
+
+    @app_commands.command(name="sync_commands", description="Manually sync slash commands")
+    @app_commands.default_permissions(administrator=True)
+    async def sync_commands(self, interaction: discord.Interaction):
+        """Manually sync slash commands."""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            synced = await self.bot.tree.sync()
+            await interaction.followup.send(f"✅ Synced {len(synced)} command(s)")
+            self.logger.info(f"[debug_commands.sync_commands] Synced {len(synced)} commands")
+            
+            # Send admin notification
+            await self._send_admin_notification(
+                f"🔄 **Commands Synced**",
+                f"**User:** {interaction.user.mention}\n"
+                f"**Commands Synced:** {len(synced)}"
+            )
+        except Exception as e:
+            self.logger.error(f"[debug_commands.sync_commands] Error syncing commands: {e}")
+            await interaction.followup.send(f"❌ Error syncing commands: {e}")
+
+    async def _send_admin_notification(self, title: str, description: str):
+        """Send notification to admin channel."""
+        try:
+            if hasattr(self.bot, 'admin_notification_channel_id'):
+                channel = self.bot.get_channel(self.bot.admin_notification_channel_id)
+                if channel:
+                    embed = discord.Embed(
+                        title=title,
+                        description=description,
+                        color=0x00ff00,
+                        timestamp=discord.utils.utcnow()
+                    )
+                    await channel.send(embed=embed)
+                    self.logger.info(f"[debug_commands._send_admin_notification] Sent notification: {title}")
+                else:
+                    self.logger.warning("[debug_commands._send_admin_notification] Admin notification channel not found")
+            else:
+                self.logger.warning("[debug_commands._send_admin_notification] Admin notification channel ID not configured")
+        except Exception as e:
+            self.logger.error(f"[debug_commands._send_admin_notification] Error sending notification: {e}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Called when the cog is ready."""
+        self.logger.info("[debug_commands.on_ready] Debug commands cog is ready")
+        self.logger.info(f"[debug_commands.on_ready] Available commands: debug_activity, test_message_tracking, backfill_stats, inspect_redis, trigger_activity_report")
+
 
 async def setup(bot):
     """Add cog to bot."""
     await bot.add_cog(DebugCommandsCog(bot))
+    logging.getLogger('cogs.debug_commands').info("[debug_commands.setup] Debug commands cog loaded successfully")

@@ -25,6 +25,7 @@ class CoreCog(commands.Cog):
         self.logger.info("[core.__init__] Core cog initialized")
     
     @app_commands.command(name="status", description="Check bot and database health status")
+    @app_commands.default_permissions(administrator=True)
     async def status(self, interaction: discord.Interaction):
         """
         Health check command for Docker and admin monitoring.
@@ -141,6 +142,7 @@ class CoreCog(commands.Cog):
                 self.logger.error(f"[core.status] Failed to send error message: {send_error}")
     
     @app_commands.command(name="info", description="Get bot information and statistics")
+    @app_commands.default_permissions(administrator=True)
     async def info(self, interaction: discord.Interaction):
         """Display bot information and basic statistics."""
         try:

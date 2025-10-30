@@ -213,6 +213,7 @@ class AgoraBot(commands.Bot):
             'cogs.admin_management',  # Admin channel promotion and statistics
             'cogs.tasks',  # Background tasks for statistics and cleanup
             'cogs.debug_commands',  # Debug and testing commands
+            'cogs.admin_commands',  # Organized admin command groups
         ]
         
         for cog in cogs_to_load:
